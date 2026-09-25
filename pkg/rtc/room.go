@@ -259,7 +259,7 @@ func NewRoom(
 	egressLauncher EgressLauncher,
 ) *Room {
 	r := &Room{
-		protoRoom: utils.CloneProto(room),
+		protoRoom: proto.CloneOf(room),
 		internal:  internal,
 		logger: LoggerWithRoom(
 			logger.GetLogger().WithComponent(sutils.ComponentRoom),
@@ -593,7 +593,7 @@ func (r *Room) ResumeParticipant(
 		ClientConfiguration: p.GetClientConfiguration(),
 		ServerInfo:          r.serverInfo,
 		LastMessageSeq:      p.GetLastReliableSequence(false),
-	}); err != nil {
+	}, nil); err != nil {
 		return err
 	}
 
@@ -889,7 +889,7 @@ func (r *Room) GetAgentDispatches(dispatchID string) ([]*livekit.AgentDispatch, 
 
 	for _, ad := range r.agentDispatches {
 		if dispatchID == "" || ad.Id == dispatchID {
-			ret = append(ret, utils.CloneProto(ad.AgentDispatch))
+			ret = append(ret, proto.CloneOf(ad.AgentDispatch))
 		}
 	}
 
@@ -1617,7 +1617,7 @@ func (r *Room) sendSpeakerChanges(speakers []*livekit.SpeakerInfo) {
 
 func (r *Room) updateProto() *livekit.Room {
 	r.lock.RLock()
-	room := utils.CloneProto(r.protoRoom)
+	room := proto.CloneOf(r.protoRoom)
 	r.lock.RUnlock()
 
 	room.NumPublishers = 0
@@ -1688,7 +1688,7 @@ func (r *Room) audioUpdateWorker() {
 		// changedSpeakers need to include previous speakers that are no longer speaking
 		for sid, speaker := range lastActiveMap {
 			if nextActiveMap[sid] == nil {
-				inactiveSpeaker := utils.CloneProto(speaker)
+				inactiveSpeaker := proto.CloneOf(speaker)
 				inactiveSpeaker.Level = 0
 				inactiveSpeaker.Active = false
 				changedSpeakers = append(changedSpeakers, inactiveSpeaker)
