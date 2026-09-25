@@ -1,4 +1,5 @@
 // Copyright 2023 LiveKit, Inc.
+// Modifications Copyright 2026 Argon Inc. LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -77,7 +78,7 @@ func (ag *AgentDispatchService) CreateDispatch(ctx context.Context, req *livekit
 			return nil, err
 		}
 
-		_, err = ag.router.CreateRoom(ctx, &livekit.CreateRoomRequest{Name: req.Room})
+		_, err = ag.router.CreateRoom(ctx, tagRoomAPIKey(ctx, &livekit.CreateRoomRequest{Name: req.Room}))
 		if err != nil {
 			return nil, err
 		}

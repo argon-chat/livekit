@@ -1,4 +1,5 @@
 // Copyright 2023 LiveKit, Inc.
+// Modifications Copyright 2026 Argon Inc. LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -128,6 +129,10 @@ type Room struct {
 	launchedTrackEgresses     map[livekit.ParticipantIdentity][]livekit.TrackID
 	agentParticpants          map[livekit.ParticipantIdentity]*agentJob
 	bufferFactory             *buffer.FactoryOfBufferFactory
+
+	// Argon: participants forwarded into this room, and rooms this room's participants are forwarded to (forwarded.go)
+	forwarded      map[livekit.ParticipantIdentity]*forwardedParticipant
+	forwardTargets map[livekit.ParticipantID]map[*Room]struct{}
 
 	// batch update participant info for non-publishers
 	batchedUpdates   map[livekit.ParticipantIdentity]*ParticipantUpdate
@@ -276,6 +281,8 @@ func NewRoom(
 		hasPublished:                         make(map[livekit.ParticipantIdentity]bool),
 		launchedTrackEgresses:                make(map[livekit.ParticipantIdentity][]livekit.TrackID),
 		agentParticpants:                     make(map[livekit.ParticipantIdentity]*agentJob),
+		forwarded:                            make(map[livekit.ParticipantIdentity]*forwardedParticipant),
+		forwardTargets:                       make(map[livekit.ParticipantID]map[*Room]struct{}),
 		bufferFactory:                        buffer.NewFactoryOfBufferFactory(config.Receiver.PacketBufferSizeVideo, config.Receiver.PacketBufferSizeAudio),
 		batchedUpdates:                       make(map[livekit.ParticipantIdentity]*ParticipantUpdate),
 		closed:                               make(chan struct{}),
@@ -381,7 +388,7 @@ func (r *Room) GetParticipantCount() int {
 }
 
 func (r *Room) GetActiveSpeakers() []*livekit.SpeakerInfo {
-	participants := r.GetParticipants()
+	participants := append(r.GetParticipants(), r.forwardedSources()...)
 	speakers := make([]*livekit.SpeakerInfo, 0, len(participants))
 	for _, p := range participants {
 		level, active := p.GetAudioLevel()
@@ -452,7 +459,7 @@ func (r *Room) Join(
 		return ErrRoomClosed
 	}
 
-	if r.participants[participant.Identity()] != nil {
+	if r.participants[participant.Identity()] != nil || r.forwarded[participant.Identity()] != nil {
 		return ErrAlreadyJoined
 	}
 	if r.protoRoom.MaxParticipants > 0 && !participant.IsDependent() {
@@ -592,6 +599,7 @@ func (r *Room) ResumeParticipant(
 
 	// include the local participant's info as well, since metadata could have been changed
 	updates := GetOtherParticipantInfo(nil, false, toParticipants(r.GetParticipants()), false)
+	updates = append(updates, r.GetForwardedParticipantInfos()...)
 	if err := p.SendParticipantUpdate(updates); err != nil {
 		return err
 	}
@@ -710,6 +718,7 @@ func (r *Room) onUpdateSubscriptionPermission(participant types.LocalParticipant
 	for _, track := range participant.GetPublishedDataTracks() {
 		r.trackManager.NotifyTrackChanged(track.ID())
 	}
+	r.forwardTracksChanged(participant)
 	return nil
 }
 
@@ -728,7 +737,7 @@ func (r *Room) ResolveMediaTrackForSubscriber(sub types.LocalParticipant, trackI
 	res.PublisherIdentity = info.PublisherIdentity
 	res.PublisherID = info.PublisherID
 
-	pub := r.GetParticipantByID(info.PublisherID)
+	pub := r.getPublisherByID(info.PublisherID)
 	// when publisher is not found, we will assume it doesn't have permission to access
 	if pub != nil {
 		res.HasPermission = IsParticipantExemptFromTrackPermissionsRestrictions(sub) || pub.HasPermission(trackID, sub.Identity())
@@ -785,6 +794,11 @@ func (r *Room) CloseIfEmpty() {
 			return
 		}
 	}
+	// Argon: forwarded publishers keep the room alive, they are bound to a live source participant
+	if len(r.forwarded) > 0 {
+		r.lock.Unlock()
+		return
+	}
 
 	var timeout uint32
 	var elapsed int64
@@ -824,6 +838,7 @@ func (r *Room) Close(reason types.RoomCloseReason) {
 	for _, p := range r.GetParticipants() {
 		_ = p.Close(true, participantCloseReason, false)
 	}
+	r.closeForwards()
 
 	r.protoProxy.Stop()
 
@@ -1047,7 +1062,7 @@ func (r *Room) createJoinResponseLocked(
 ) *livekit.JoinResponse {
 	iceConfig := participant.GetICEConfig()
 	hasICEFallback := iceConfig.GetPreferencePublisher() != livekit.ICECandidateType_ICT_NONE || iceConfig.GetPreferenceSubscriber() != livekit.ICECandidateType_ICT_NONE
-	return &livekit.JoinResponse{
+	joinResponse := &livekit.JoinResponse{
 		Room:        r.ToProto(),
 		Participant: participant.ToProto(),
 		OtherParticipants: GetOtherParticipantInfo(
@@ -1070,6 +1085,8 @@ func (r *Room) createJoinResponseLocked(
 		EnabledPublishCodecs: participant.GetEnabledPublishCodecs(),
 		FastPublish:          participant.CanPublish() && !hasICEFallback,
 	}
+	joinResponse.OtherParticipants = append(joinResponse.OtherParticipants, r.forwardedInfosLocked()...)
+	return joinResponse
 }
 
 // a ParticipantImpl in the room added a new track, subscribe other participants to it
@@ -1078,6 +1095,7 @@ func (r *Room) onTrackPublished(participant types.Participant, track types.Media
 
 	// publish participant update, since track state is changed
 	r.broadcastParticipantState(participant, broadcastOptions{skipSource: true})
+	r.forwardTrackPublished(participant, track)
 
 	r.lock.RLock()
 	// subscribe all existing participants to this MediaTrack
@@ -1163,6 +1181,7 @@ func (r *Room) onTrackPublished(participant types.Participant, track types.Media
 func (r *Room) onTrackUpdated(p types.Participant, _ types.MediaTrack) {
 	// send track updates to everyone, especially if track was updated by admin
 	r.broadcastParticipantState(p, broadcastOptions{})
+	r.forwardParticipantChanged(p)
 	if r.onParticipantChanged != nil {
 		r.onParticipantChanged(p)
 	}
@@ -1170,6 +1189,7 @@ func (r *Room) onTrackUpdated(p types.Participant, _ types.MediaTrack) {
 
 func (r *Room) onTrackUnpublished(p types.Participant, track types.MediaTrack) {
 	r.trackManager.RemoveTrack(track)
+	r.forwardTrackUnpublished(p, track)
 	if !p.IsClosed() {
 		r.broadcastParticipantState(p, broadcastOptions{skipSource: true})
 	}
@@ -1229,6 +1249,7 @@ func (r *Room) onParticipantUpdate(p types.Participant) {
 	r.protoProxy.MarkDirty(false)
 	// immediately notify when permissions or metadata changed
 	r.broadcastParticipantState(p, broadcastOptions{immediate: true})
+	r.forwardParticipantChanged(p)
 	if r.onParticipantChanged != nil {
 		r.onParticipantChanged(p)
 	}
@@ -1316,7 +1337,7 @@ func (r *Room) onMetrics(source types.Participant, dp *livekit.DataPacket) {
 
 func (r *Room) onSubscribeStatusChanged(participant types.LocalParticipant, publisherID livekit.ParticipantID, subscribed bool) {
 	if subscribed {
-		pub := r.GetParticipantByID(publisherID)
+		pub := r.getPublisherByID(publisherID)
 		if pub != nil && pub.State() == livekit.ParticipantInfo_ACTIVE {
 			// when a participant subscribes to another participant,
 			// send speaker update if the subscribed to participant is active.
@@ -1475,6 +1496,9 @@ func (r *Room) RemoveParticipant(
 		r.trackManager.RemoveDataTrack(t)
 	}
 
+	// Argon: end forwards of this participant session into other rooms
+	r.unforwardAll(p.ID())
+
 	if agentJob != nil {
 		agentJob.participantLeft()
 
@@ -1527,6 +1551,12 @@ func (r *Room) subscribeToExistingTracks(p types.LocalParticipant, isSync bool) 
 				trackIDs = append(trackIDs, track.ID())
 				p.SubscribeToDataTrack(track.ID())
 			}
+		}
+	}
+	if autoSubscribe {
+		for _, trackID := range r.forwardedTrackIDs() {
+			trackIDs = append(trackIDs, trackID)
+			p.SubscribeToTrack(trackID, isSync)
 		}
 	}
 	if len(trackIDs) > 0 {

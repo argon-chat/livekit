@@ -1,4 +1,5 @@
 // Copyright 2023 LiveKit, Inc.
+// Modifications Copyright 2026 Argon Inc. LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -41,6 +42,9 @@ var (
 	ErrRemoteUnmuteNoteEnabled          = psrpc.NewErrorf(psrpc.FailedPrecondition, "remote unmute not enabled")
 	ErrTrackNotFound                    = psrpc.NewErrorf(psrpc.NotFound, "track is not found")
 	ErrWebHookMissingAPIKey             = psrpc.NewErrorf(psrpc.InvalidArgument, "api_key is required to use webhooks")
+	ErrWebHookRouteUnknownAPIKey        = psrpc.NewErrorf(psrpc.InvalidArgument, "webhook route api_key is not one of the configured keys")
+	ErrWebHookRouteDuplicateAPIKey      = psrpc.NewErrorf(psrpc.InvalidArgument, "webhook route api_key is used by more than one route")
+	ErrWebHookRouteMissingURLs          = psrpc.NewErrorf(psrpc.InvalidArgument, "webhook route requires at least one url")
 	ErrSIPNotConnected                  = psrpc.NewErrorf(psrpc.Internal, "sip not connected (redis required)")
 	ErrSIPTrunkNotFound                 = psrpc.NewErrorf(psrpc.NotFound, "requested sip trunk does not exist")
 	ErrSIPDispatchRuleNotFound          = psrpc.NewErrorf(psrpc.NotFound, "requested sip dispatch rule does not exist")
@@ -49,4 +53,11 @@ var (
 	ErrNoConnectRequest                 = psrpc.NewErrorf(psrpc.InvalidArgument, "no connect request")
 	ErrNoConnectResponse                = psrpc.NewErrorf(psrpc.InvalidArgument, "no connect response")
 	ErrDestinationIdentityRequired      = psrpc.NewErrorf(psrpc.InvalidArgument, "destination identity is required")
+
+	// Argon: participant forwarding
+	ErrForwardCrossNode             = psrpc.NewErrorf(psrpc.FailedPrecondition, "destination room is hosted on another node, forwarding is same-node only")
+	ErrForwardIdentityInUse         = psrpc.NewErrorf(psrpc.AlreadyExists, "a participant with the same identity is already in the destination room")
+	ErrForwardedParticipantReadOnly = psrpc.NewErrorf(psrpc.FailedPrecondition, "participant is forwarded into this room, update it in its source room")
+	ErrForwardHiddenParticipant     = psrpc.NewErrorf(psrpc.InvalidArgument, "hidden participants cannot be forwarded")
+	ErrMoveNotSupported             = psrpc.NewErrorf(psrpc.Unimplemented, "MoveParticipant is not supported by this fork yet")
 )

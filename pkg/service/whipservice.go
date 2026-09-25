@@ -1,4 +1,5 @@
 // Copyright 2023 LiveKit, Inc.
+// Modifications Copyright 2026 Argon Inc. LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -196,6 +197,7 @@ func (s *WHIPService) validateCreate(w http.ResponseWriter, r *http.Request) (*c
 		DisableICELite: true,
 	}
 	SetRoomConfiguration(pi.CreateRoom, claims.GetRoomConfiguration())
+	tagRoomAPIKey(r.Context(), pi.CreateRoom)
 
 	return &createRequest{
 		roomName,

@@ -1,4 +1,5 @@
 // Copyright 2023 LiveKit, Inc.
+// Modifications Copyright 2026 Argon Inc. LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -161,7 +162,7 @@ func createKeyProvider(conf *config.Config) (auth.KeyProvider, error) {
 	return auth.NewFileBasedKeyProviderFromMap(conf.Keys), nil
 }
 
-func createWebhookNotifier(conf *config.Config, provider auth.KeyProvider) (webhook.QueuedNotifier, error) {
+func createWebhookNotifier(conf *config.Config, provider auth.KeyProvider, store ServiceStore) (webhook.QueuedNotifier, error) {
 	wc := conf.WebHook
 
 	secret := provider.GetSecret(wc.APIKey)
@@ -169,7 +170,7 @@ func createWebhookNotifier(conf *config.Config, provider auth.KeyProvider) (webh
 		return nil, ErrWebHookMissingAPIKey
 	}
 
-	return webhook.NewDefaultNotifier(wc, provider)
+	return NewWebhookNotifier(wc, provider, store)
 }
 
 func createTelemetryService(notifier webhook.QueuedNotifier, analytics telemetry.AnalyticsService) telemetry.TelemetryService {

@@ -1,4 +1,5 @@
 // Copyright 2023 LiveKit, Inc.
+// Modifications Copyright 2026 Argon Inc. LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -826,6 +827,7 @@ func (r *RoomManager) ListParticipants(ctx context.Context, req *livekit.ListPar
 	for _, p := range participants {
 		items = append(items, p.ToProto())
 	}
+	items = append(items, room.GetForwardedParticipantInfos()...)
 
 	return &livekit.ListParticipantsResponse{
 		Participants: items,
@@ -840,6 +842,9 @@ func (r *RoomManager) GetParticipant(ctx context.Context, req *livekit.RoomParti
 
 	participant := room.GetParticipant(livekit.ParticipantIdentity(req.Identity))
 	if participant == nil {
+		if pi := room.GetForwardedParticipantInfo(livekit.ParticipantIdentity(req.Identity)); pi != nil {
+			return pi, nil
+		}
 		return nil, ErrParticipantNotFound
 	}
 
@@ -848,6 +853,10 @@ func (r *RoomManager) GetParticipant(ctx context.Context, req *livekit.RoomParti
 
 func (r *RoomManager) RemoveParticipant(ctx context.Context, req *livekit.RoomParticipantIdentity) (*livekit.RemoveParticipantResponse, error) {
 	room, participant, err := r.roomAndParticipantForReq(ctx, req)
+	if errors.Is(err, ErrParticipantNotFound) {
+		// Argon: removing a forwarded identity from the destination stops the forward
+		return r.removeForwardedParticipant(ctx, req)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -859,6 +868,10 @@ func (r *RoomManager) RemoveParticipant(ctx context.Context, req *livekit.RoomPa
 
 func (r *RoomManager) MutePublishedTrack(ctx context.Context, req *livekit.MuteRoomTrackRequest) (*livekit.MuteRoomTrackResponse, error) {
 	_, participant, err := r.roomAndParticipantForReq(ctx, req)
+	if errors.Is(err, ErrParticipantNotFound) {
+		// Argon: muting a forwarded identity mutes the source track
+		_, participant, err = r.forwardedSourceForReq(ctx, req)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -879,7 +892,7 @@ func (r *RoomManager) MutePublishedTrack(ctx context.Context, req *livekit.MuteR
 func (r *RoomManager) UpdateParticipant(ctx context.Context, req *livekit.UpdateParticipantRequest) (*livekit.ParticipantInfo, error) {
 	_, participant, err := r.roomAndParticipantForReq(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, r.forwardAwareErr(ctx, req, err)
 	}
 
 	if err = participant.UpdateMetadata(&livekit.UpdateParticipantMetadata{
@@ -903,11 +916,11 @@ func (r *RoomManager) UpdateParticipant(ctx context.Context, req *livekit.Update
 }
 
 func (r *RoomManager) ForwardParticipant(ctx context.Context, req *livekit.ForwardParticipantRequest) (*livekit.ForwardParticipantResponse, error) {
-	return nil, errors.New("not implemented")
+	return r.forwardParticipant(ctx, req)
 }
 
 func (r *RoomManager) MoveParticipant(ctx context.Context, req *livekit.MoveParticipantRequest) (*livekit.MoveParticipantResponse, error) {
-	return nil, errors.New("not implemented")
+	return nil, ErrMoveNotSupported
 }
 
 func (r *RoomManager) PerformRpc(ctx context.Context, req *livekit.PerformRpcRequest) (*livekit.PerformRpcResponse, error) {
@@ -954,7 +967,7 @@ func (r *RoomManager) DeleteRoom(ctx context.Context, req *livekit.DeleteRoomReq
 func (r *RoomManager) UpdateSubscriptions(ctx context.Context, req *livekit.UpdateSubscriptionsRequest) (*livekit.UpdateSubscriptionsResponse, error) {
 	room, participant, err := r.roomAndParticipantForReq(ctx, req)
 	if err != nil {
-		return nil, err
+		return nil, r.forwardAwareErr(ctx, req, err)
 	}
 
 	participant.GetLogger().Debugw("updating participant subscriptions")
@@ -1221,7 +1234,7 @@ func (h *roomManagerParticipantHelper) GetParticipantInfo(pID livekit.Participan
 	if p := h.room.GetParticipantByID(pID); p != nil {
 		return p.ToProto()
 	}
-	return nil
+	return h.room.GetForwardedParticipantInfoByID(pID)
 }
 
 func (h *roomManagerParticipantHelper) GetRegionSettings(ip string) *livekit.RegionSettings {

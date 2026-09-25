@@ -1,3 +1,16 @@
+## Argon fork
+
+This is [argon-chat/livekit](https://github.com/argon-chat/livekit), Argon's fork of [livekit/livekit](https://github.com/livekit/livekit) (based on v1.13.7). It adds:
+
+- per-API-key webhook routing
+- same-node `ForwardParticipant` for broadcast channels
+
+Image: `ghcr.io/argon-chat/livekit` (linux/amd64 only). Tags: `master` (latest master build), `sha-<short>` (every master build, pinnable), `vX.Y.Z` and `vX.Y` (release tags).
+Release: push a `v*` tag; the Docker workflow publishes the image and GoReleaser drafts a GitHub Release with linux/windows amd64 binaries.
+Upstream: livekit/livekit. Keep feature code in new files to stay mergeable.
+
+---
+
 <!--BEGIN_BANNER_IMAGE-->
 
 <picture>

@@ -24,12 +24,8 @@ builds:
       - CGO_ENABLED=0
     main: ./cmd/server
     binary: livekit-server
-    goarm:
-      - "7"
     goarch:
       - amd64
-      - arm64
-      - arm
     goos:
       - linux
       - windows
@@ -42,7 +38,7 @@ archives:
       - LICENSE
 release:
   github:
-    owner: livekit
+    owner: argon-chat
     name: livekit
   draft: true
   prerelease: auto

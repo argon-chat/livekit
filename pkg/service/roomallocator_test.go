@@ -1,4 +1,5 @@
 // Copyright 2023 LiveKit, Inc.
+// Modifications Copyright 2026 Argon Inc. LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -44,6 +45,29 @@ func TestCreateRoom(t *testing.T) {
 		require.Equal(t, conf.Room.EmptyTimeout, room.EmptyTimeout)
 		require.Equal(t, conf.Room.DepartureTimeout, room.DepartureTimeout)
 		require.NotEmpty(t, room.EnabledCodecs)
+	})
+
+	t.Run("the api key a room is created with is stored and kept", func(t *testing.T) {
+		conf, err := config.NewConfig("", true, nil, nil)
+		require.NoError(t, err)
+
+		store := &servicefakes.FakeObjectStore{}
+		store.LoadRoomReturns(nil, nil, service.ErrRoomNotFound)
+		ra, err := service.NewRoomAllocator(conf, &routingfakes.FakeRouter{}, store)
+		require.NoError(t, err)
+
+		req := &livekit.CreateRoomRequest{Name: "myroom", Tags: map[string]string{service.RoomAPIKeyTag: "APImeet"}}
+		room, internal, created, err := ra.CreateRoom(context.Background(), req, true)
+		require.NoError(t, err)
+		require.True(t, created)
+		require.Equal(t, "APImeet", internal.Tags[service.RoomAPIKeyTag])
+
+		store.LoadRoomReturns(room, internal, nil)
+		req.Tags[service.RoomAPIKeyTag] = "APIbots"
+		_, internal, created, err = ra.CreateRoom(context.Background(), req, true)
+		require.NoError(t, err)
+		require.False(t, created)
+		require.Equal(t, "APImeet", internal.Tags[service.RoomAPIKeyTag])
 	})
 }
 

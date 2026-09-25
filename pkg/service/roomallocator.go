@@ -1,4 +1,5 @@
 // Copyright 2023 LiveKit, Inc.
+// Modifications Copyright 2026 Argon Inc. LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -123,6 +124,7 @@ func (r *StandardRoomAllocator) CreateRoom(ctx context.Context, req *livekit.Cre
 	if req.SyncStreams {
 		internal.SyncStreams = true
 	}
+	applyRoomAPIKeyTag(req, internal)
 
 	if err = r.roomStore.StoreRoom(ctx, rm, internal); err != nil {
 		return nil, nil, false, err

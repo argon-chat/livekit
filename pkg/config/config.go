@@ -1,4 +1,5 @@
 // Copyright 2023 LiveKit, Inc.
+// Modifications Copyright 2026 Argon Inc. LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -90,7 +91,7 @@ type Config struct {
 	TURN           TURNConfig               `yaml:"turn,omitempty"`
 	Ingress        IngressConfig            `yaml:"ingress,omitempty"`
 	SIP            SIPConfig                `yaml:"sip,omitempty"`
-	WebHook        webhook.WebHookConfig    `yaml:"webhook,omitempty"`
+	WebHook        WebHookConfig            `yaml:"webhook,omitempty"`
 	NodeSelector   NodeSelectorConfig       `yaml:"node_selector,omitempty"`
 	KeyFile        string                   `yaml:"key_file,omitempty"`
 	Keys           map[string]string        `yaml:"keys,omitempty"`
@@ -469,6 +470,18 @@ type IngressConfig struct {
 
 type SIPConfig struct{}
 
+type WebHookConfig struct {
+	webhook.WebHookConfig `yaml:",inline"`
+	// events of a room created with a route's api_key go only to that route, signed with
+	// that key. Rooms created with any other key use the urls above
+	Routes []WebHookRouteConfig `yaml:"routes,omitempty"`
+}
+
+type WebHookRouteConfig struct {
+	APIKey string   `yaml:"api_key,omitempty"`
+	URLs   []string `yaml:"urls,omitempty"`
+}
+
 type APIConfig struct {
 	// amount of time to wait for API to execute, default 2s
 	ExecutionTimeout time.Duration `yaml:"execution_timeout,omitempty"`
@@ -622,7 +635,7 @@ var DefaultConfig = Config{
 	PSRPC:            rpc.DefaultPSRPCConfig,
 	Keys:             map[string]string{},
 	Metric:           metric.DefaultMetricConfig,
-	WebHook:          webhook.DefaultWebHookConfig,
+	WebHook:          WebHookConfig{WebHookConfig: webhook.DefaultWebHookConfig},
 	NodeStats:        DefaultNodeStatsConfig,
 	API:              DefaultAPIConfig(),
 	EnableDataTracks: true,

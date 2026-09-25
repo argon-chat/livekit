@@ -1,4 +1,5 @@
 // Copyright 2023 LiveKit, Inc.
+// Modifications Copyright 2026 Argon Inc. LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -102,7 +103,7 @@ func (s *RoomService) CreateRoom(ctx context.Context, req *livekit.CreateRoomReq
 		return nil, err
 	}
 
-	room, err := s.router.CreateRoom(ctx, req)
+	room, err := s.router.CreateRoom(ctx, tagRoomAPIKey(ctx, req))
 	RecordResponse(ctx, room)
 	return room, err
 }

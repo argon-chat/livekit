@@ -241,6 +241,15 @@ keys:
 #   # list of URLs to be notified of room events
 #   urls:
 #     - https://your-host.com/handler
+#   # optional per-API-key routes. A room belongs to the API key that created it (the
+#   # CreateRoom call or the first participant to join). Its events, including egress
+#   # and ingress events, go only to the route of that key and are signed with it,
+#   # whatever keys later participants use. Rooms created with a key that has no route
+#   # use the urls above; without urls above such events are dropped
+#   routes:
+#     - api_key: <other_api_key>
+#       urls:
+#         - https://other-host.com/handler
 
 # Signal Relay
 # since v1.4.0, a more reliable, psrpc based signal relay is available

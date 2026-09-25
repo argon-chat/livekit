@@ -1,4 +1,5 @@
 // Copyright 2023 LiveKit, Inc.
+// Modifications Copyright 2026 Argon Inc. LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -41,4 +42,10 @@ var (
 	ErrSubscriptionLimitExceeded = errors.New("participant has exceeded its subscription limit")
 
 	ErrNoSubscribeMetricsPermission = errors.New("participant is not given permission to subscribe to metrics")
+
+	// Argon: participant forwarding
+	ErrAlreadyForwarded         = errors.New("participant is already forwarded into the room")
+	ErrForwardSameRoom          = errors.New("cannot forward a participant into its own room")
+	ErrForwardSourceGone        = errors.New("source participant has left its room")
+	ErrForwardHiddenParticipant = errors.New("hidden participants cannot be forwarded")
 )

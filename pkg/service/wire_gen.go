@@ -75,7 +75,7 @@ func InitializeServer(conf *config.Config, currentNode routing.LocalNode) (*Live
 	if err != nil {
 		return nil, err
 	}
-	queuedNotifier, err := createWebhookNotifier(conf, keyProvider)
+	queuedNotifier, err := createWebhookNotifier(conf, keyProvider, objectStore)
 	if err != nil {
 		return nil, err
 	}
@@ -222,7 +222,7 @@ func createKeyProvider(conf *config.Config) (auth.KeyProvider, error) {
 	return auth.NewFileBasedKeyProviderFromMap(conf.Keys), nil
 }
 
-func createWebhookNotifier(conf *config.Config, provider auth.KeyProvider) (webhook.QueuedNotifier, error) {
+func createWebhookNotifier(conf *config.Config, provider auth.KeyProvider, store ServiceStore) (webhook.QueuedNotifier, error) {
 	wc := conf.WebHook
 
 	secret := provider.GetSecret(wc.APIKey)
@@ -230,7 +230,7 @@ func createWebhookNotifier(conf *config.Config, provider auth.KeyProvider) (webh
 		return nil, ErrWebHookMissingAPIKey
 	}
 
-	return webhook.NewDefaultNotifier(wc, provider)
+	return NewWebhookNotifier(wc, provider, store)
 }
 
 func createTelemetryService(notifier webhook.QueuedNotifier, analytics telemetry.AnalyticsService) telemetry.TelemetryService {

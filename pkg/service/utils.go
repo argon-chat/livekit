@@ -1,4 +1,5 @@
 // Copyright 2023 LiveKit, Inc.
+// Modifications Copyright 2026 Argon Inc. LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -410,7 +411,7 @@ func ValidateConnectRequest(
 		RoomPreset: claims.RoomPreset,
 	}
 	SetRoomConfiguration(createRequest, claims.GetRoomConfiguration())
-	res.createRoomRequest = createRequest
+	res.createRoomRequest = tagRoomAPIKey(r.Context(), createRequest)
 
 	if len(params.metadata) != 0 {
 		// Make sure grant has GetCanUpdateOwnMetadata set

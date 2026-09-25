@@ -1,4 +1,5 @@
 // Copyright 2023 LiveKit, Inc.
+// Modifications Copyright 2026 Argon Inc. LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -21,6 +22,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"github.com/urfave/cli/v3"
+
+	"github.com/livekit/protocol/webhook"
 
 	"github.com/livekit/livekit-server/pkg/config/configtest"
 )
@@ -246,4 +249,25 @@ func TestLoadTURNSecrets(t *testing.T) {
 		require.NoError(t, conf.LoadTURNSecrets())
 		require.Equal(t, "fromfile", conf.RTC.TURNServers[0].Secret)
 	})
+}
+
+func TestConfig_WebHookRoutes(t *testing.T) {
+	const content = `webhook:
+  api_key: APIdefault
+  urls:
+    - https://argon.example/webhook
+  routes:
+    - api_key: APImeet
+      urls:
+        - https://meet.example/livekit/webhook
+`
+	conf, err := NewConfig(content, true, nil, nil)
+	require.NoError(t, err)
+	require.Equal(t, "APIdefault", conf.WebHook.APIKey)
+	require.Equal(t, []string{"https://argon.example/webhook"}, conf.WebHook.URLs)
+	require.Equal(t, webhook.DefaultResourceURLNotifierConfig, conf.WebHook.ResourceURLNotifier)
+	require.Equal(t, []WebHookRouteConfig{{
+		APIKey: "APImeet",
+		URLs:   []string{"https://meet.example/livekit/webhook"},
+	}}, conf.WebHook.Routes)
 }
