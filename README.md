@@ -5,7 +5,7 @@ This is [argon-chat/livekit](https://github.com/argon-chat/livekit), Argon's for
 - per-API-key webhook routing
 - same-node `ForwardParticipant` for broadcast channels
 
-Image: `ghcr.io/argon-chat/livekit` (linux/amd64 only). Tags: `master` (latest master build), `sha-<short>` (every master build, pinnable), `vX.Y.Z` and `vX.Y` (release tags).
+Image: `ghcr.io/argon-chat/livekit` (linux/amd64 only). Tags: `master` (latest master build), `vX.Y.Z-<short sha>` and `sha-<short sha>` (every master build, pinnable; X.Y.Z is the upstream base version from `version/version.go`), `vX.Y.Z-argon.N` (release tags).
 Release: push a `v*` tag; the Docker workflow publishes the image and GoReleaser drafts a GitHub Release with linux/windows amd64 binaries.
 Upstream: livekit/livekit. Keep feature code in new files to stay mergeable.
 

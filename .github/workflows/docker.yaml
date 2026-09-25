@@ -33,6 +33,14 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Base version of the fork (version/version.go), so that master builds carry it too:
+      # v1.13.7-<short sha>. Release tags (v1.13.7-argon.N) come from the git tag via semver below.
+      - name: Resolve base version
+        id: version
+        run: |
+          base=$(grep -o 'Version = "[^"]*"' version/version.go | cut -d'"' -f2)
+          test -n "$base"
+          echo "base=$base" >> "$GITHUB_OUTPUT"
       - name: Docker meta
         id: meta
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
@@ -43,7 +51,9 @@ jobs:
           # generate Docker tags based on the following events/attributes
           tags: |
             type=ref,event=branch
-            type=semver,pattern=v{{version}}
+            type=raw,value=v${{ steps.version.outputs.base }}-{{sha}},enable={{is_default_branch}}
+            # {{raw}} keeps the git tag as-is (v1.13.7-argon.1); with v{{version}} a pre-release tag lost its "v"
+            type=semver,pattern={{raw}}
             type=semver,pattern=v{{major}}.{{minor}}
             type=sha
 
