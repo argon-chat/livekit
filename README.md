@@ -4,6 +4,7 @@ This is [argon-chat/livekit](https://github.com/argon-chat/livekit), Argon's for
 
 - per-API-key webhook routing
 - same-node `ForwardParticipant` for broadcast channels
+- same-node `MoveParticipant` (upstream carries the SFU-side plumbing, the fork adds the room and service side)
 
 Image: `ghcr.io/argon-chat/livekit` (linux/amd64 only). Tags: `master` (latest master build), `vX.Y.Z-<short sha>` and `sha-<short sha>` (every master build, pinnable; X.Y.Z is the upstream base version from `version/version.go`), `vX.Y.Z-argon.N` (release tags).
 Release: push a `v*` tag; the Docker workflow publishes the image and GoReleaser drafts a GitHub Release with linux/windows amd64 binaries.

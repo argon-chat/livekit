@@ -1,4 +1,5 @@
 // Copyright 2023 LiveKit, Inc.
+// Modifications Copyright 2026 Argon Inc. LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -477,6 +478,8 @@ type LocalParticipant interface {
 
 	// getters
 	GetCountry() string
+	// Argon: API key the participant was admitted with, empty if unknown
+	APIKey() string
 	GetTrailer() []byte
 	GetLoggerResolver() logger.DeferredFieldResolver
 	GetReporter() roomobs.ParticipantSessionReporter

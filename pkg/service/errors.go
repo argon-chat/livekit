@@ -59,5 +59,9 @@ var (
 	ErrForwardIdentityInUse         = psrpc.NewErrorf(psrpc.AlreadyExists, "a participant with the same identity is already in the destination room")
 	ErrForwardedParticipantReadOnly = psrpc.NewErrorf(psrpc.FailedPrecondition, "participant is forwarded into this room, update it in its source room")
 	ErrForwardHiddenParticipant     = psrpc.NewErrorf(psrpc.InvalidArgument, "hidden participants cannot be forwarded")
-	ErrMoveNotSupported             = psrpc.NewErrorf(psrpc.Unimplemented, "MoveParticipant is not supported by this fork yet")
+
+	// Argon: participant move
+	ErrMoveCrossNode     = psrpc.NewErrorf(psrpc.FailedPrecondition, "destination room is hosted on another node, moving is same-node only")
+	ErrMoveIdentityInUse = psrpc.NewErrorf(psrpc.AlreadyExists, "a participant with the same identity is already in the destination room")
+	ErrMoveNoSigningKey  = psrpc.NewErrorf(psrpc.FailedPrecondition, "no configured API key to sign the move token with")
 )

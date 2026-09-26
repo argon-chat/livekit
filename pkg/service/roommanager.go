@@ -506,6 +506,7 @@ func (r *RoomManager) StartSession(
 		SubscribeEnabledCodecs:   enabledCodecs,
 		Grants:                   pi.Grants,
 		TokenExpiresAt:           pi.TokenExpiresAt,
+		APIKey:                   createRoom.GetTags()[RoomAPIKeyTag], // Argon: set by tagRoomAPIKey
 		Reconnect:                pi.Reconnect,
 		Logger:                   pLogger,
 		Reporter:                 roomobs.NewNoopParticipantSessionReporter(),
@@ -621,7 +622,7 @@ func (r *RoomManager) StartSession(
 		// update room store with new numParticipants
 		proto := room.ToProto()
 		persistRoomForParticipantCount(proto)
-		r.telemetry.ParticipantLeft(ctx, proto, p.ToProto(), true, participant.TelemetryGuard())
+		r.telemetry.ParticipantLeft(ctx, proto, leftParticipantInfo(p), true, participant.TelemetryGuard())
 	})
 	participant.OnClaimsChanged(func(participant types.LocalParticipant) {
 		pLogger.Debugw("refreshing client token after claims change")
@@ -782,7 +783,8 @@ func (r *RoomManager) rtcSessionWorker(room *rtc.Room, participant types.LocalPa
 
 		case obj := <-requestSource.ReadChan():
 			if obj == nil {
-				if room.GetParticipantRequestSource(participant.Identity()) == requestSource {
+				// Argon: the participant may have moved to another room
+				if r.participantRequestSource(room, participant) == requestSource {
 					participant.HandleSignalSourceClose()
 				}
 				return
@@ -920,7 +922,7 @@ func (r *RoomManager) ForwardParticipant(ctx context.Context, req *livekit.Forwa
 }
 
 func (r *RoomManager) MoveParticipant(ctx context.Context, req *livekit.MoveParticipantRequest) (*livekit.MoveParticipantResponse, error) {
-	return nil, ErrMoveNotSupported
+	return r.moveParticipant(ctx, req)
 }
 
 func (r *RoomManager) PerformRpc(ctx context.Context, req *livekit.PerformRpcRequest) (*livekit.PerformRpcResponse, error) {

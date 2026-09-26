@@ -90,7 +90,7 @@ func (r *RoomManager) forwardParticipant(ctx context.Context, req *livekit.Forwa
 		}
 	}
 
-	dest, err := r.getOrCreateForwardDestination(ctx, srcRoom, destName)
+	dest, err := r.getOrCreateLocalDestination(ctx, srcRoom, destName, ErrForwardCrossNode)
 	if err != nil {
 		return nil, err
 	}
@@ -144,17 +144,17 @@ func (r *RoomManager) forwardParticipant(ctx context.Context, req *livekit.Forwa
 	return &livekit.ForwardParticipantResponse{}, nil
 }
 
-// getOrCreateForwardDestination returns a held destination room hosted on this node, creating it when allowed.
-func (r *RoomManager) getOrCreateForwardDestination(ctx context.Context, srcRoom *rtc.Room, destName livekit.RoomName) (*rtc.Room, error) {
+// getOrCreateLocalDestination returns a held destination room hosted on this node, creating it when allowed.
+// Used by forwards and moves, which are same-node only: crossNodeErr is returned when another live node
+// hosts the destination. A stale assignment to a dead node is taken over, like SelectRoomNode does.
+func (r *RoomManager) getOrCreateLocalDestination(ctx context.Context, srcRoom *rtc.Room, destName livekit.RoomName, crossNodeErr error) (*rtc.Room, error) {
 	if room := r.GetRoom(ctx, destName); room != nil && room.Hold() {
 		return room, nil
 	}
 
-	// Argon: forwarding is same-node only, refuse when another live node hosts the destination.
-	// A stale assignment to a dead node is taken over, like SelectRoomNode does.
 	node, err := r.router.GetNodeForRoom(ctx, destName)
 	if err == nil && node != nil && selector.IsAvailable(node) && livekit.NodeID(node.Id) != r.currentNode.NodeID() {
-		return nil, ErrForwardCrossNode
+		return nil, crossNodeErr
 	} else if err != nil && !errors.Is(err, routing.ErrNotFound) {
 		return nil, err
 	}

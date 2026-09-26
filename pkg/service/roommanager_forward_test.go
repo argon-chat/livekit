@@ -290,9 +290,6 @@ func TestRoomManagerForwardParticipant(t *testing.T) {
 		env.allocator.validateErr = ErrRoomNotFound
 		_, err = env.rm.ForwardParticipant(ctx, &livekit.ForwardParticipantRequest{Room: "radio", Identity: "bc:alice", DestinationRoom: "missing"})
 		require.ErrorIs(t, err, ErrRoomNotFound)
-
-		_, err = env.rm.MoveParticipant(ctx, &livekit.MoveParticipantRequest{Room: "radio", Identity: "bc:alice", DestinationRoom: "channel"})
-		require.ErrorIs(t, err, ErrMoveNotSupported)
 	})
 }
 

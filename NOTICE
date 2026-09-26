@@ -13,4 +13,4 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Modifications Copyright 2026 Argon Inc. LLC
-This fork (argon-chat/livekit) adds per-API-key webhook routing and same-node ForwardParticipant for broadcast channels.
+This fork (argon-chat/livekit) adds per-API-key webhook routing, same-node ForwardParticipant for broadcast channels and same-node MoveParticipant.

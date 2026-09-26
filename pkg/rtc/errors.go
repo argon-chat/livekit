@@ -48,4 +48,8 @@ var (
 	ErrForwardSameRoom          = errors.New("cannot forward a participant into its own room")
 	ErrForwardSourceGone        = errors.New("source participant has left its room")
 	ErrForwardHiddenParticipant = errors.New("hidden participants cannot be forwarded")
+
+	// Argon: participant move
+	ErrMoveSameRoom   = errors.New("cannot move a participant into its own room")
+	ErrMoveSourceGone = errors.New("participant is no longer in the source room")
 )
