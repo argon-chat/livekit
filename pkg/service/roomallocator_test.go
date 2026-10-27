@@ -40,7 +40,7 @@ func TestCreateRoom(t *testing.T) {
 
 		ra, conf := newTestRoomAllocator(t, conf, node.Clone())
 
-		room, _, _, err := ra.CreateRoom(context.Background(), &livekit.CreateRoomRequest{Name: "myroom"}, true)
+		room, _, _, _, err := ra.CreateRoom(context.Background(), &livekit.CreateRoomRequest{Name: "myroom"}, true)
 		require.NoError(t, err)
 		require.Equal(t, conf.Room.EmptyTimeout, room.EmptyTimeout)
 		require.Equal(t, conf.Room.DepartureTimeout, room.DepartureTimeout)
@@ -57,17 +57,49 @@ func TestCreateRoom(t *testing.T) {
 		require.NoError(t, err)
 
 		req := &livekit.CreateRoomRequest{Name: "myroom", Tags: map[string]string{service.RoomAPIKeyTag: "APImeet"}}
-		room, internal, created, err := ra.CreateRoom(context.Background(), req, true)
+		room, internal, _, created, err := ra.CreateRoom(context.Background(), req, true)
 		require.NoError(t, err)
 		require.True(t, created)
 		require.Equal(t, "APImeet", internal.Tags[service.RoomAPIKeyTag])
 
 		store.LoadRoomReturns(room, internal, nil)
 		req.Tags[service.RoomAPIKeyTag] = "APIbots"
-		_, internal, created, err = ra.CreateRoom(context.Background(), req, true)
+		_, internal, _, created, err = ra.CreateRoom(context.Background(), req, true)
 		require.NoError(t, err)
 		require.False(t, created)
 		require.Equal(t, "APImeet", internal.Tags[service.RoomAPIKeyTag])
+	})
+
+	t.Run("return the request with the room preset applied", func(t *testing.T) {
+		conf, err := config.NewConfig(`
+room:
+  room_configurations:
+    record:
+      egress:
+        room:
+          layout: grid
+`, true, nil, nil)
+		require.NoError(t, err)
+
+		node, err := routing.NewLocalNode(conf)
+		require.NoError(t, err)
+
+		ra, conf := newTestRoomAllocator(t, conf, node.Clone())
+
+		// without a preset, the request itself is returned
+		req := &livekit.CreateRoomRequest{Name: "myroom"}
+		_, _, applied, _, err := ra.CreateRoom(context.Background(), req, true)
+		require.NoError(t, err)
+		require.Same(t, req, applied)
+
+		// with a preset, a copy with the preset applied is returned,
+		// leaving both the request and the preset unchanged
+		req = &livekit.CreateRoomRequest{Name: "myroom", RoomPreset: "record"}
+		_, _, applied, _, err = ra.CreateRoom(context.Background(), req, true)
+		require.NoError(t, err)
+		require.Nil(t, req.Egress)
+		require.Equal(t, "grid", applied.GetEgress().GetRoom().GetLayout())
+		require.NotSame(t, conf.Room.RoomConfigurations["record"].Egress.Room, applied.Egress.Room)
 	})
 }
 

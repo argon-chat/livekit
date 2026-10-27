@@ -2,6 +2,7 @@ package sfu
 
 import (
 	"math"
+	"math/bits"
 	"sync"
 	"time"
 
@@ -13,6 +14,12 @@ import (
 const (
 	cHighForwardingLatency = 20 * time.Millisecond
 	cSkewFactor            = 10
+
+	// forwardLatencyPercentile is the transit quantile reported as the node's
+	// forwarding latency and read by the overload controller. p90 tracks a broad
+	// slowdown but ignores the sparse tail (a few packets stalled on goroutine
+	// scheduling), which shedding cannot fix.
+	forwardLatencyPercentile = 0.90
 )
 
 const (
@@ -25,7 +32,7 @@ const (
 	forwardSampleShardSel  = forwardSampleNumShards - 1
 )
 
-// forwardSampleShard is a ring of transit samples with multiple producers and a
+// forwardSampleShard is a ring of packed samples with multiple producers and a
 // single consumer. A producer reserves a slot, stores the value, then publishes
 // the slot's epoch (reserved index + 1). The consumer reads a slot only once its
 // epoch marks the value committed for that index.
@@ -36,7 +43,7 @@ type forwardSampleShard struct {
 	seq      [forwardSampleShardCap]atomic.Uint64 // per-slot publish epoch
 }
 
-// forwardSampleBuffer holds per-packet transit samples produced on the packet
+// forwardSampleBuffer holds per-packet samples produced on the packet
 // path and consumed by the background worker, which performs metric emission.
 type forwardSampleBuffer struct {
 	shards  [forwardSampleNumShards]forwardSampleShard
@@ -45,11 +52,11 @@ type forwardSampleBuffer struct {
 
 // push records a sample: reserve a slot, store the value, then publish the
 // slot's epoch. The shard is selected from arrival time bits.
-func (b *forwardSampleBuffer) push(arrival, transitNs int64) {
+func (b *forwardSampleBuffer) push(arrival, sample int64) {
 	sh := &b.shards[(uint64(arrival)>>6)&forwardSampleShardSel]
 	i := sh.writeIdx.Add(1) - 1
 	slot := i & forwardSampleShardMask
-	sh.ring[slot].Store(transitNs)
+	sh.ring[slot].Store(sample)
 	sh.seq[slot].Store(i + 1)
 }
 
@@ -61,7 +68,7 @@ func (b *forwardSampleBuffer) push(arrival, transitNs int64) {
 // draining stops and resumes from there on the next call, so no sample is read
 // stale or skipped. When producers get a shard's capacity ahead, or overwrite a
 // slot before it is read, the affected samples are counted as dropped.
-func (b *forwardSampleBuffer) drain(fn func(transitNs int64)) {
+func (b *forwardSampleBuffer) drain(fn func(sample int64)) {
 	for si := range b.shards {
 		sh := &b.shards[si]
 		w := sh.writeIdx.Load()
@@ -94,32 +101,116 @@ func (b *forwardSampleBuffer) takeDropped() uint64 {
 	return b.dropped.Swap(0)
 }
 
-// forwardSummary is a mergeable summary of forwarding transit over an interval.
-// The sum of squares is kept in microseconds so it does not overflow int64.
-type forwardSummary struct {
-	count   int64
-	sumUs   int64
-	sumSqUs int64
-	minNs   int64
-	maxNs   int64
+// A sample packs transit (high 40 bits, in ns, up to ~18 minutes) and processing per
+// subscriber written (low 24 bits, in 16 ns units, up to ~268 ms) into one slot, so the
+// second value costs no extra atomic.
+const (
+	forwardProcessingBits  = 24
+	forwardProcessingShift = 4 // 16 ns units
+	forwardNoProcessing    = 1<<forwardProcessingBits - 1
+	forwardMaxTransitNs    = 1<<(64-forwardProcessingBits) - 1
+)
+
+// packForwardSample packs a sample, a negative processingPerSubscriberNs meaning none.
+func packForwardSample(transitNs, processingPerSubscriberNs int64) int64 {
+	processing := uint64(forwardNoProcessing)
+	if processingPerSubscriberNs >= 0 {
+		processing = min(uint64(processingPerSubscriberNs)>>forwardProcessingShift, forwardNoProcessing-1)
+	}
+	return int64(uint64(min(max(transitNs, 0), forwardMaxTransitNs))<<forwardProcessingBits | processing)
 }
 
-func (s forwardSummary) addSample(transitNs int64) forwardSummary {
-	us := transitNs / 1000
-	if s.count == 0 {
-		return forwardSummary{count: 1, sumUs: us, sumSqUs: us * us, minNs: transitNs, maxNs: transitNs}
+// unpackForwardSample returns the transit and processing per subscriber, -1 when there is none.
+func unpackForwardSample(sample int64) (transitNs, processingPerSubscriberNs int64) {
+	transitNs = int64(uint64(sample) >> forwardProcessingBits)
+	if processing := uint64(sample) & forwardNoProcessing; processing != forwardNoProcessing {
+		return transitNs, int64(processing << forwardProcessingShift)
 	}
+	return transitNs, -1
+}
 
+// forwardSummary is a mergeable histogram of forwarding transit over an
+// interval. Each power-of-two octave [2^e, 2^(e+1)) us is split into
+// forwardHistSub linear sub-buckets, and each bucket keeps the observed
+// [min, max] of the samples in it. A percentile interpolates within the
+// crossing bucket's observed range rather than its nominal edges, so the
+// estimate never leaves the samples and is exact when a bucket's samples
+// cluster -- which keeps it accurate near an overload threshold that falls
+// mid-bucket, without needing threshold-aware boundaries. Two summaries merge
+// by adding their buckets, so the percentile covers the whole report window,
+// and a few stalled packets (e.g. from goroutine scheduling latency) cannot
+// drag it the way a mean does.
+const (
+	forwardHistSub     = 8                                   // linear sub-buckets per octave
+	forwardHistOctaves = 27                                  // up to 2^27 us (~134 s)
+	forwardHistBuckets = forwardHistOctaves * forwardHistSub // 216
+)
+
+// bucketStat is one bucket: how many samples fell in it and their observed
+// transit range in nanoseconds.
+type bucketStat struct {
+	count int64
+	minNs int64
+	maxNs int64
+}
+
+func (b *bucketStat) add(transitNs int64) {
+	if b.count == 0 {
+		b.minNs, b.maxNs = transitNs, transitNs
+	} else {
+		b.minNs = min(b.minNs, transitNs)
+		b.maxNs = max(b.maxNs, transitNs)
+	}
+	b.count++
+}
+
+func (b *bucketStat) mergeIn(o bucketStat) {
+	if o.count == 0 {
+		return
+	}
+	if b.count == 0 {
+		*b = o
+		return
+	}
+	b.count += o.count
+	b.minNs = min(b.minNs, o.minNs)
+	b.maxNs = max(b.maxNs, o.maxNs)
+}
+
+type forwardSummary struct {
+	count   int64
+	minNs   int64
+	maxNs   int64
+	sumNs   int64
+	buckets [forwardHistBuckets]bucketStat
+}
+
+// forwardBucket returns the bucket index for a transit in nanoseconds: the
+// octave floor(log2(us)) times forwardHistSub, plus the linear sub-bucket
+// within the octave.
+func forwardBucket(transitNs int64) int {
+	us := transitNs / 1000
+	if us <= 0 {
+		return 0
+	}
+	e := bits.Len64(uint64(us)) - 1 // floor(log2(us)), us >= 1 so e >= 0
+	if e >= forwardHistOctaves {
+		return forwardHistBuckets - 1
+	}
+	octave := int64(1) << e
+	return e*forwardHistSub + int((us-octave)*forwardHistSub/octave)
+}
+
+func (s *forwardSummary) addSample(transitNs int64) {
+	if s.count == 0 {
+		s.minNs, s.maxNs = transitNs, transitNs
+	} else {
+		s.minNs = min(s.minNs, transitNs)
+		s.maxNs = max(s.maxNs, transitNs)
+	}
 	s.count++
-	s.sumUs += us
-	s.sumSqUs += us * us
-	if transitNs < s.minNs {
-		s.minNs = transitNs
-	}
-	if transitNs > s.maxNs {
-		s.maxNs = transitNs
-	}
-	return s
+	s.sumNs += transitNs
+	s.buckets[forwardBucket(transitNs)].add(transitNs)
 }
 
 func (s forwardSummary) merge(o forwardSummary) forwardSummary {
@@ -129,35 +220,57 @@ func (s forwardSummary) merge(o forwardSummary) forwardSummary {
 	if s.count == 0 {
 		return o
 	}
-	return forwardSummary{
-		count:   s.count + o.count,
-		sumUs:   s.sumUs + o.sumUs,
-		sumSqUs: s.sumSqUs + o.sumSqUs,
-		minNs:   min(s.minNs, o.minNs),
-		maxNs:   max(s.maxNs, o.maxNs),
+	s.count += o.count
+	s.minNs = min(s.minNs, o.minNs)
+	s.maxNs = max(s.maxNs, o.maxNs)
+	s.sumNs += o.sumNs
+	for i := range s.buckets {
+		s.buckets[i].mergeIn(o.buckets[i])
 	}
+	return s
 }
 
-func (s forwardSummary) meanStdDev() (mean, stdDev time.Duration) {
+// percentile returns the p-quantile (0..1) of transit, interpolated within the
+// observed [min, max] of the bucket the quantile falls in.
+func (s forwardSummary) percentile(p float64) time.Duration {
 	if s.count == 0 {
-		return 0, 0
+		return 0
 	}
+	target := p * float64(s.count)
+	var cum float64
+	for i := range s.buckets {
+		b := s.buckets[i]
+		c := float64(b.count)
+		if c == 0 {
+			continue
+		}
+		if cum+c >= target {
+			lo, hi := float64(b.minNs), float64(b.maxNs)
+			return time.Duration(lo + (hi-lo)*(target-cum)/c)
+		}
+		cum += c
+	}
+	return time.Duration(s.maxNs)
+}
 
-	meanUs := float64(s.sumUs) / float64(s.count)
-	mean = time.Duration(meanUs * float64(time.Microsecond))
-	if s.count < 2 {
-		return mean, 0
+func (s forwardSummary) mean() time.Duration {
+	if s.count == 0 {
+		return 0
 	}
+	return time.Duration(s.sumNs / s.count)
+}
 
-	// sample variance (divisor count-1)
-	m2 := float64(s.sumSqUs) - float64(s.sumUs)*meanUs
-	varUs2 := m2 / float64(s.count-1)
-	if varUs2 < 0 {
-		// floating point rounding can push a (near-zero) variance slightly negative
-		varUs2 = 0
+// forwardIntervalSummary holds one summary interval's transit and processing per subscriber.
+type forwardIntervalSummary struct {
+	transit                 forwardSummary
+	processingPerSubscriber forwardSummary
+}
+
+func (s forwardIntervalSummary) merge(o forwardIntervalSummary) forwardIntervalSummary {
+	return forwardIntervalSummary{
+		transit:                 s.transit.merge(o.transit),
+		processingPerSubscriber: s.processingPerSubscriber.merge(o.processingPerSubscriber),
 	}
-	stdDev = time.Duration(math.Sqrt(varUs2) * float64(time.Microsecond))
-	return mean, stdDev
 }
 
 type ForwardStats struct {
@@ -167,7 +280,7 @@ type ForwardStats struct {
 	// written by the background worker (flush) and read both by the worker
 	// (report) and by external callers (GetStats), so it is guarded by lock.
 	lock     sync.Mutex
-	ring     []forwardSummary
+	ring     []forwardIntervalSummary
 	ringHead int
 	ringLen  int
 
@@ -184,7 +297,7 @@ func NewForwardStats(summaryInterval, reportInterval, reportWindow time.Duration
 	}
 
 	s := &ForwardStats{
-		ring:            make([]forwardSummary, ringCap),
+		ring:            make([]forwardIntervalSummary, ringCap),
 		summaryInterval: summaryInterval,
 		reportInterval:  reportInterval,
 		closeCh:         make(chan struct{}),
@@ -199,7 +312,19 @@ func NewForwardStats(summaryInterval, reportInterval, reportWindow time.Duration
 // The sample is aggregated and emitted by the background worker.
 func (s *ForwardStats) Update(arrival, left int64) (int64, bool) {
 	transit := left - arrival
-	s.samples.push(arrival, transit)
+	s.samples.push(arrival, packForwardSample(transit, -1))
+	return transit, time.Duration(transit) > cHighForwardingLatency
+}
+
+// UpdateForwarded is Update for a packet the receiver dequeued and wrote writeCount
+// times. It also records the processing (dequeue to end of fan-out) per write.
+func (s *ForwardStats) UpdateForwarded(arrival, dequeuedAt, left int64, writeCount int32) (int64, bool) {
+	transit := left - arrival
+	processingPerSubscriber := int64(-1)
+	if writeCount > 0 {
+		processingPerSubscriber = (left - dequeuedAt) / int64(writeCount)
+	}
+	s.samples.push(arrival, packForwardSample(transit, processingPerSubscriber))
 	return transit, time.Duration(transit) > cHighForwardingLatency
 }
 
@@ -230,13 +355,18 @@ func (s *ForwardStats) run() {
 }
 
 // flush drains the buffered samples, observes each into the Prometheus
-// histogram, and folds the interval summary into the window ring used for the
-// latency/jitter gauges.
+// histograms, and folds the interval summary into the window ring used for the
+// gauges.
 func (s *ForwardStats) flush() {
-	var summ forwardSummary
-	s.samples.drain(func(transitNs int64) {
+	var summ forwardIntervalSummary
+	s.samples.drain(func(sample int64) {
+		transitNs, processingPerSubscriberNs := unpackForwardSample(sample)
 		prometheus.RecordForwardLatencySample(transitNs)
-		summ = summ.addSample(transitNs)
+		summ.transit.addSample(transitNs)
+		if processingPerSubscriberNs >= 0 {
+			prometheus.RecordForwardProcessingPerWriteSample(processingPerSubscriberNs)
+			summ.processingPerSubscriber.addSample(processingPerSubscriberNs)
+		}
 	})
 
 	s.lock.Lock()
@@ -250,7 +380,7 @@ func (s *ForwardStats) flush() {
 
 // summarize merges the ring summaries covering the most recent window. A
 // window <= 0 (or >= the report window) covers the entire ring.
-func (s *ForwardStats) summarize(window time.Duration) forwardSummary {
+func (s *ForwardStats) summarize(window time.Duration) forwardIntervalSummary {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
@@ -266,7 +396,7 @@ func (s *ForwardStats) summarize(window time.Duration) forwardSummary {
 	}
 
 	// walk backwards from the most recent entry (ringHead-1) over n entries.
-	var w forwardSummary
+	var w forwardIntervalSummary
 	for i := 0; i < n; i++ {
 		idx := (s.ringHead - 1 - i + len(s.ring)) % len(s.ring)
 		w = w.merge(s.ring[idx])
@@ -274,33 +404,40 @@ func (s *ForwardStats) summarize(window time.Duration) forwardSummary {
 	return w
 }
 
-// GetStats returns the mean latency and jitter (std dev) of the forwarding
-// transit over the most recent duration. The duration is rounded up to a whole
-// number of summary intervals (the smallest bucket span that covers it). A
-// duration <= 0, or one that meets/exceeds the report window, covers the full
-// window.
-func (s *ForwardStats) GetStats(duration time.Duration) (time.Duration, time.Duration) {
-	return s.summarize(duration).meanStdDev()
+// GetStats returns the reported forwarding-latency percentile
+// (forwardLatencyPercentile) over the most recent duration. The duration is
+// rounded up to a whole number of summary intervals (the smallest bucket span
+// that covers it). A duration <= 0, or one that meets/exceeds the report window,
+// covers the full window.
+func (s *ForwardStats) GetStats(duration time.Duration) time.Duration {
+	return s.summarize(duration).transit.percentile(forwardLatencyPercentile)
 }
 
 func (s *ForwardStats) report() {
-	w := s.summarize(0)
+	ws := s.summarize(0)
+	w := ws.transit
 
-	latency, jitter := w.meanStdDev()
+	p90 := w.percentile(forwardLatencyPercentile)
 	if dropped := s.samples.takeDropped(); dropped > 0 {
 		logger.Warnw("forward stats sample buffer overflow", nil, "dropped", dropped)
 	}
-	if w.count > 0 && jitter > latency*cSkewFactor {
+	// a max far above p90 means a few packets stalled (e.g. goroutine scheduling
+	// latency) rather than a broad forwarding slowdown; p90 rides through it.
+	if w.count > 0 && w.maxNs > p90.Nanoseconds()*cSkewFactor {
 		logger.Infow(
-			"high jitter in forwarding path",
+			"high spread in forwarding path",
 			"lowest", time.Duration(w.minNs),
 			"highest", time.Duration(w.maxNs),
 			"count", w.count,
-			"latency", latency,
-			"jitter", jitter,
+			"p90", p90,
 		)
 	}
 
-	prometheus.RecordForwardJitter(uint32(jitter.Nanoseconds()))
-	prometheus.RecordForwardLatency(uint32(latency.Nanoseconds()))
+	prometheus.RecordForwardLatency(saturatingNs(p90))
+	prometheus.RecordForwardProcessingPerWrite(saturatingNs(ws.processingPerSubscriber.mean()))
+}
+
+// saturatingNs converts to uint32 nanoseconds, saturating at ~4.29s instead of wrapping.
+func saturatingNs(d time.Duration) uint32 {
+	return uint32(min(max(d.Nanoseconds(), 0), math.MaxUint32))
 }

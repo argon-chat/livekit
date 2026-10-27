@@ -421,6 +421,9 @@ func newPeerConnection(
 		// As Firefox does not support migration, ICE Lite can be disabled.
 		se.SetLite(false)
 	}
+	// ICE checks already prove the remote address, so the HelloVerifyRequest cookie only adds a round trip.
+	// pion applies this only when this side ends up as the DTLS server.
+	se.SetDTLSInsecureSkipHelloVerify(true)
 	se.SetDTLSRetransmissionInterval(dtlsRetransmissionInterval)
 	se.SetDTLSConnectContextMaker(func() (context.Context, func()) {
 		return context.WithTimeout(context.Background(), dtlsHandshakeTimeout)
@@ -566,7 +569,6 @@ func NewPCTransport(params TransportParams) (*PCTransport, error) {
 		previousTrackDescription: make(map[string]*trackDescription),
 		canReuseTransceiver:      true,
 		connectionDetails:        types.NewICEConnectionDetails(params.Transport, params.Logger),
-		lastNegotiate:            time.Now(),
 	}
 	t.localOfferId.Store(uint32(rand.Intn(1<<8) + 1))
 
@@ -582,12 +584,25 @@ func NewPCTransport(params TransportParams) (*PCTransport, error) {
 				Config: params.CongestionControlConfig.SendSideBWE,
 				Logger: params.Logger,
 			})
-			switch pacer.PacerBehavior(params.CongestionControlConfig.SendSideBWEPacer) {
+			switch behavior := pacer.PacerBehavior(params.CongestionControlConfig.SendSideBWEPacer); behavior {
 			case pacer.PacerBehaviorPassThrough:
 				t.pacer = pacer.NewPassThrough(params.Logger, t.bwe)
 			case pacer.PacerBehaviorNoQueue:
 				t.pacer = pacer.NewNoQueue(params.Logger, t.bwe)
 			default:
+				// leaky-bucket lands here: it is a recognized value, but LeakyBucket paces
+				// to a bitrate set through Pacer.SetBitrate and nothing drives that from
+				// the bandwidth estimate, so it would pace at a fixed rate and ignore
+				// congestion. Unknown values are rejected by CongestionControlConfig.
+				// Validate, so they only reach here from callers building TransportParams
+				// directly.
+				if behavior != "" {
+					params.Logger.Warnw(
+						"send side BWE pacer unavailable, falling back", nil,
+						"pacerBehavior", behavior,
+						"fallback", pacer.PacerBehaviorNoQueue,
+					)
+				}
 				t.pacer = pacer.NewNoQueue(params.Logger, t.bwe)
 			}
 		} else {
@@ -1027,6 +1042,7 @@ func (t *PCTransport) queueOrConfigureSender(
 		filterOutH264HighProfile: !t.params.IsOfferer,
 		enableAudioStereo:        enableAudioStereo,
 		enableAudioNACK:          enableAudioNACK,
+		enableFlexFEC:            t.params.DirectionConfig.FlexFEC.Enabled,
 	}
 	if !t.params.IsOfferer {
 		t.sendersPendingConfigMu.Lock()
@@ -1694,12 +1710,24 @@ func (t *PCTransport) HandleRemoteDescription(sd webrtc.SessionDescription, remo
 			return err
 		}
 		t.setRemoteOfferParsed(sd.Type, parsed)
+		if sd.Type == webrtc.SDPTypeOffer {
+			t.params.Handler.OnSetRemoteDescriptionOffer()
+		}
 
 		rtxRepairs := nonSimulcastRTXRepairsFromSDP(parsed, t.params.Logger)
 		if len(rtxRepairs) > 0 {
 			t.params.Logger.Debugw("rtx pairs found from sdp", "ssrcs", rtxRepairs)
 			for repair, base := range rtxRepairs {
 				t.params.Config.BufferFactory.SetRTXPair(repair, base, "")
+			}
+		}
+
+		if t.params.DirectionConfig.FlexFEC.Enabled {
+			if fecFlows := fecPairsFromSDP(parsed, t.params.Logger); len(fecFlows) > 0 {
+				t.params.Logger.Debugw("fec pairs found from sdp", "ssrcs", fecFlows)
+				for fec, base := range fecFlows {
+					t.params.Config.BufferFactory.SetFECPair(fec, base)
+				}
 			}
 		}
 		return nil
@@ -2981,6 +3009,15 @@ func (t *PCTransport) handleRemoteOfferReceived(sd *webrtc.SessionDescription, p
 		}
 	}
 
+	if t.params.DirectionConfig.FlexFEC.Enabled {
+		if fecFlows := fecPairsFromSDP(parsed, t.params.Logger); len(fecFlows) > 0 {
+			t.params.Logger.Debugw("fec pairs found from sdp", "ssrcs", fecFlows)
+			for fec, base := range fecFlows {
+				t.params.Config.BufferFactory.SetFECPair(fec, base)
+			}
+		}
+	}
+
 	if t.currentOfferIceCredential == "" || offerRestartICE {
 		t.currentOfferIceCredential = iceCredential
 	}
@@ -3154,6 +3191,7 @@ type configureSenderParams struct {
 	filterOutH264HighProfile bool
 	enableAudioStereo        bool
 	enableAudioNACK          bool
+	enableFlexFEC            bool
 }
 
 func configureSender(params configureSenderParams, offerAudioPT map[mime.MimeType]webrtc.PayloadType) {
@@ -3162,6 +3200,7 @@ func configureSender(params configureSenderParams, offerAudioPT map[mime.MimeTyp
 		params.enabledCodecs,
 		params.rtcpFeedbackConfig,
 		params.filterOutH264HighProfile,
+		params.enableFlexFEC,
 	)
 
 	if params.transceiver.Kind() == webrtc.RTPCodecTypeAudio {
@@ -3267,6 +3306,7 @@ func configureSenderCodecs(
 	enabledCodecs []*livekit.Codec,
 	rtcpFeedbackConfig RTCPFeedbackConfig,
 	filterOutH264HighProfile bool,
+	enableFlexFEC bool,
 ) {
 	if len(enabledCodecs) == 0 {
 		return
@@ -3282,6 +3322,7 @@ func configureSenderCodecs(
 		enabledCodecs,
 		rtcpFeedbackConfig,
 		filterOutH264HighProfile,
+		enableFlexFEC,
 	)
 	tr.SetCodecPreferences(filteredCodecs)
 }
@@ -3295,6 +3336,10 @@ func (t *PCTransport) restrictReceiverCodecsToPublishList() {
 			tr.Direction() != webrtc.RTPTransceiverDirectionSendrecv {
 			continue
 		}
+		// a mid-less sender is not negotiated yet, see sendersPendingConfig
+		if tr.Mid() == "" {
+			continue
+		}
 		receiver := tr.Receiver()
 		if receiver == nil {
 			continue
@@ -3304,6 +3349,7 @@ func (t *PCTransport) restrictReceiverCodecsToPublishList() {
 			t.params.EnabledPublishCodecs,
 			t.params.DirectionConfig.RTCPFeedback,
 			false,
+			t.params.DirectionConfig.FlexFEC.Enabled,
 		)
 		if len(filtered) == 0 {
 			continue
@@ -3355,6 +3401,14 @@ func configureReceiverCodecs(
 		// if the client don't comply with codec order in SDP answer, only keep preferred codecs to force client to use it
 		if compliesWithCodecOrderInSDPAnswer {
 			reorderedCodecs = append(reorderedCodecs, leftCodecs...)
+		} else {
+			// flexfec applies to whichever video codec is negotiated, retain
+			// it even when trimming to the preferred codec
+			for _, c := range leftCodecs {
+				if mime.IsMimeTypeStringFlexFEC03(c.RTPCodecCapability.MimeType) {
+					reorderedCodecs = append(reorderedCodecs, c)
+				}
+			}
 		}
 	} else {
 		reorderedCodecs = append(reorderedCodecs, leftCodecs...)
@@ -3403,6 +3457,37 @@ func nonSimulcastRTXRepairsFromSDP(s *sdp.SessionDescription, logger logger.Logg
 	}
 
 	return rtxRepairFlows
+}
+
+// fecPairsFromSDP extracts FlexFEC repair flows declared via
+// `a=ssrc-group:FEC-FR <media ssrc> <fec ssrc>` (RFC 5956) from the remote
+// description, returning a map of fec ssrc -> protected media ssrc.
+func fecPairsFromSDP(s *sdp.SessionDescription, logger logger.Logger) map[uint32]uint32 {
+	fecFlows := map[uint32]uint32{}
+	for _, media := range s.MediaDescriptions {
+		for _, attr := range media.Attributes {
+			if attr.Key != sdp.AttrKeySSRCGroup {
+				continue
+			}
+			fields := strings.Fields(attr.Value)
+			if len(fields) != 3 || fields[0] != sdp.SemanticTokenForwardErrorCorrectionFramework {
+				continue
+			}
+			baseSsrc, err := strconv.ParseUint(fields[1], 10, 32)
+			if err != nil {
+				logger.Warnw("failed to parse SSRC", err, "ssrc", fields[1])
+				continue
+			}
+			fecSsrc, err := strconv.ParseUint(fields[2], 10, 32)
+			if err != nil {
+				logger.Warnw("failed to parse SSRC", err, "ssrc", fields[2])
+				continue
+			}
+			fecFlows[uint32(fecSsrc)] = uint32(baseSsrc)
+		}
+	}
+
+	return fecFlows
 }
 
 // ----------------------

@@ -104,6 +104,8 @@ type RoomManager struct {
 
 	forwardStats *sfu.ForwardStats
 
+	subscribePacer *rtc.SubscribePacer
+
 	rpc.UnimplementedParticipantServer
 	rpc.UnimplementedRoomServer
 	rpc.UnimplementedRoomManagerServer
@@ -145,6 +147,7 @@ func NewLocalRoomManager(
 		turnAuthHandler:   turnAuthHandler,
 		bus:               bus,
 		forwardStats:      forwardStats,
+		subscribePacer:    rtc.NewSubscribePacer(conf.Limit.SubscribePaceShadowRates),
 
 		rooms: make(map[livekit.RoomName]*rtc.Room),
 
@@ -295,11 +298,8 @@ func (r *RoomManager) StartSession(
 	sessionStartTime := time.Now()
 
 	if pi.Identity != "" && pi.Grants != nil {
-		if !r.config.Limit.CheckMetadataSize(pi.Grants.Metadata) {
-			return ErrMetadataExceedsLimits
-		}
-		if !r.config.Limit.CheckAttributesSize(pi.Grants.Attributes) {
-			return ErrAttributeExceedsLimits
+		if err := CheckConnectLimits(r.config.Limit, string(pi.Identity), livekit.RoomName(pi.CreateRoom.GetName()), pi.Grants); err != nil {
+			return err
 		}
 	}
 
@@ -437,6 +437,7 @@ func (r *RoomManager) StartSession(
 		"nodeID", r.currentNode.NodeID(),
 		"numParticipants", room.GetParticipantCount(),
 		"participantInit", &pi,
+		"apiKey", pi.APIKey,
 	)
 
 	clientConf := r.clientConfManager.GetConfiguration(pi.Client)
@@ -530,6 +531,7 @@ func (r *RoomManager) StartSession(
 		SubscriberAllowPause:              subscriberAllowPause,
 		SubscriptionLimitAudio:            r.config.Limit.SubscriptionLimitAudio,
 		SubscriptionLimitVideo:            r.config.Limit.SubscriptionLimitVideo,
+		SubscribePacer:                    r.subscribePacer,
 		PlayoutDelay:                      roomInternal.GetPlayoutDelay(),
 		SyncStreams:                       roomInternal.GetSyncStreams(),
 		ForwardStats:                      r.forwardStats,
@@ -658,7 +660,9 @@ func (r *RoomManager) getOrCreateRoom(ctx context.Context, createRoom *livekit.C
 	}
 
 	// create new room, get details first
-	ri, internal, created, err := r.roomAllocator.CreateRoom(ctx, createRoom, true)
+	// createRoom is reassigned to the request with the room preset applied, so that a room
+	// composite egress from the preset, which RoomInternal has no field for, is started
+	ri, internal, createRoom, created, err := r.roomAllocator.CreateRoom(ctx, createRoom, true)
 	if err != nil {
 		return nil, err
 	}
@@ -735,6 +739,11 @@ func (r *RoomManager) getOrCreateRoom(ctx context.Context, createRoom *livekit.C
 	prometheus.RoomStarted()
 
 	if created && createRoom.GetEgress().GetRoom() != nil {
+		if r.egressLauncher == nil {
+			newRoom.Release()
+			return nil, ErrEgressNotConnected
+		}
+
 		// ensure room name matches
 		createRoom.Egress.Room.RoomName = createRoom.Name
 		_, err = r.egressLauncher.StartEgress(ctx, &rpc.StartEgressRequest{

@@ -51,9 +51,9 @@ func (a *forwardTestAllocator) SelectRoomNode(context.Context, livekit.RoomName,
 	return nil
 }
 
-func (a *forwardTestAllocator) CreateRoom(_ context.Context, req *livekit.CreateRoomRequest, _ bool) (*livekit.Room, *livekit.RoomInternal, bool, error) {
+func (a *forwardTestAllocator) CreateRoom(_ context.Context, req *livekit.CreateRoomRequest, _ bool) (*livekit.Room, *livekit.RoomInternal, *livekit.CreateRoomRequest, bool, error) {
 	a.lastReq = req
-	return &livekit.Room{Name: req.Name, Sid: "RM_" + req.Name}, &livekit.RoomInternal{}, true, nil
+	return &livekit.Room{Name: req.Name, Sid: "RM_" + req.Name}, &livekit.RoomInternal{}, req, true, nil
 }
 
 func (a *forwardTestAllocator) ValidateCreateRoom(context.Context, livekit.RoomName) error {

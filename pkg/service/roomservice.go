@@ -19,6 +19,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"time"
 
 	"github.com/twitchtv/twirp"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/livekit/protocol/livekit"
 	"github.com/livekit/protocol/logger"
 	"github.com/livekit/protocol/rpc"
+	"github.com/livekit/protocol/utils"
 	"github.com/livekit/psrpc"
 )
 
@@ -407,7 +409,22 @@ func (s *RoomService) PerformRpc(ctx context.Context, req *livekit.PerformRpcReq
 		return nil, ErrDestinationIdentityRequired
 	}
 
-	res, err := s.participantClient.PerformRpc(ctx, s.topicFormatter.ParticipantTopic(ctx, roomName, livekit.ParticipantIdentity(req.DestinationIdentity)), req)
+	res, err := s.participantClient.PerformRpc(
+		ctx,
+		s.topicFormatter.ParticipantTopic(ctx, roomName, livekit.ParticipantIdentity(req.DestinationIdentity)),
+		req,
+		psrpc.WithRequestTimeout(performRpcRequestTimeout(req)),
+	)
 	RecordResponse(ctx, res)
 	return res, err
+}
+
+// performRpcRequestTimeout covers the participant's response window plus the ack round trip,
+// since the psrpc default request timeout is shorter than the default RPC response timeout
+func performRpcRequestTimeout(req *livekit.PerformRpcRequest) time.Duration {
+	responseTimeout := time.Duration(req.GetResponseTimeoutMs()) * time.Millisecond
+	if responseTimeout <= 0 {
+		responseTimeout = utils.DataChannelRpcDefaultResponseTimeout
+	}
+	return responseTimeout + utils.DataChannelRpcMaxRoundTripLatency
 }
